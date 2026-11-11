@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Job Radar</title>
+<style>
+:root{--bg:#eef2f7;--surface:#fff;--ink:#0f1b2d;--muted:#5b6b80;--line:#d9e0ea;--accent:#1d4ed8;--trax:#0f766e;--new:#b45309;--chip:#e6ecf5}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1520;--surface:#142031;--ink:#e8eef7;--muted:#93a3b8;--line:#243348;--accent:#7ea6ff;--trax:#4fd1c2;--new:#f5b25b;--chip:#1d2c42}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:860px;margin:0 auto;padding:28px 16px 64px}
+h1{font-size:26px;margin:0;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:2px 0 22px;font-size:13px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.tab{border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:8px 14px;border-radius:8px;font:inherit;cursor:pointer}
+.tab[aria-selected=true]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.tab small{opacity:.7;margin-left:6px}
+.tools{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+input[type=search]{flex:1;min-width:200px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit}
+label{color:var(--muted);font-size:13px;display:flex;gap:6px;align-items:center}
+.tab:focus-visible,input:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.job{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:8px}
+.job.new{border-left-color:var(--new)}
+.job.trax{border-left-color:var(--trax)}
+.job a.t{font-weight:600;color:var(--accent);text-decoration:none;font-size:16px}
+.job a.t:hover{text-decoration:underline}
+.meta{color:var(--muted);font-size:13px;margin-top:2px}
+.chips{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}
+.chip{background:var(--chip);border-radius:20px;padding:1px 9px;font-size:12px}
+.badge{color:var(--new);font-weight:600;font-size:12px;margin-left:8px}
+.empty{color:var(--muted);padding:28px 0}
+</style>
+</head>
+<body>
+<main>
+  <h1>Job Radar</h1>
+  <p class="sub" id="sub"></p>
+  <div class="tabs" role="tablist" id="tabs"></div>
+  <div class="tools">
+    <input type="search" id="q" placeholder="Filter by title, company or city" aria-label="Filter jobs">
+    <label><input type="checkbox" id="watch"> Watchlist companies only</label>
+    <label><input type="checkbox" id="newonly"> New since my last visit</label>
+  </div>
+  <div id="list"></div>
+</main>
+<script>
+const DATA = __DATA__;
+const TABS = [
+  {id:"ws-en", label:"Working student, English", test:j=>j.section==="ws"&&j.lang==="en"},
+  {id:"ws-de", label:"Working student, Deutsch", test:j=>j.section==="ws"&&j.lang==="de"},
+  {id:"trax",  label:"TRAX and FIS, Germany",    test:j=>j.section==="trax"}
+];
+let lastVisit = 0;
+try { lastVisit = Number(localStorage.getItem("jr-last")||0); } catch(e) {}
+const state = {tab: location.hash.slice(1) || "ws-en"};
+if(!TABS.some(t=>t.id===state.tab)) state.tab="ws-en";
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const isNew = j => Date.parse(j.first_seen) > lastVisit && lastVisit > 0;
+
+function render(){
+  const q = $("q").value.trim().toLowerCase(), w = $("watch").checked, n = $("newonly").checked;
+  $("tabs").innerHTML = TABS.map(t=>`<button class="tab" role="tab" data-id="${t.id}" aria-selected="${t.id===state.tab}">${t.label}<small>${DATA.jobs.filter(t.test).length}</small></button>`).join("");
+  const tab = TABS.find(t=>t.id===state.tab);
+  const rows = DATA.jobs.filter(tab.test).filter(j=>(!w||j.watch)&&(!n||isNew(j))&&(!q||(j.title+" "+j.company+" "+j.location).toLowerCase().includes(q)));
+  $("list").innerHTML = rows.length ? rows.map(j=>{
+    const cls = "job"+(isNew(j)?" new":"")+(j.section==="trax"?" trax":"");
+    const chips = (j.topics||[]).concat(j.tier==="related"?["related to TRAX"]:[],j.tier==="strong"?["mentions TRAX"]:[]).map(c=>`<span class="chip">${esc(c)}</span>`).join("");
+    return `<div class="${cls}"><a class="t" href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>${isNew(j)?'<span class="badge">new</span>':""}
+      <div class="meta">${esc(j.company)}${j.watch?" ★":""} &nbsp;|&nbsp; ${esc(j.location)} &nbsp;|&nbsp; first seen ${esc(j.first_seen.slice(0,10))}</div>
+      <div class="chips">${chips}</div></div>`;}).join("") : '<p class="empty">Nothing matches right now. New jobs appear after the next check.</p>';
+}
+$("sub").textContent = "Last check: " + new Date(DATA.updated).toLocaleString() + ". The page refreshes every 12 hours.";
+$("tabs").addEventListener("click", e=>{const b=e.target.closest(".tab"); if(b){state.tab=b.dataset.id; history.replaceState(null,"","#"+state.tab); render();}});
+["q","watch","newonly"].forEach(id=>$(id).addEventListener("input",render));
+render();
+try { localStorage.setItem("jr-last", String(Date.now())); } catch(e) {}
+</script>
+</body>
+</html>
