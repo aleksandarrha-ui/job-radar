@@ -28,18 +28,20 @@ DASH_FILE = ROOT / "docs" / "index.html"
 NOW = datetime.now(timezone.utc)
 NOW_ISO = NOW.isoformat(timespec="seconds")
 
-BA_BASES = [
-    "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4",
-    "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v6",
+SEARCH_URLS = [
+    "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v6/jobs",
+    "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/app/jobs",
+    "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobs",
 ]
-DETAIL_BASE = BA_BASES[0]
+DETAIL_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4"
 DETAIL_CAP = 150          # max job-detail requests per run (used to read the description / language)
 PAUSE = 0.35              # seconds between requests, to be polite
 
 S = requests.Session()
 S.headers.update({"X-API-Key": "jobboerse-jobsuche", "User-Agent": "Mozilla/5.0 (personal job alert)"})
-_ba_base = None
+_ba_url = None
 _requests_ok = 0
+_bad_status = {}
 
 
 def log(*a):
@@ -55,6 +57,9 @@ def http_json(url, params=None, tries=3):
                 _requests_ok += 1
                 time.sleep(PAUSE)
                 return r.json()
+            _bad_status[r.status_code] = _bad_status.get(r.status_code, 0) + 1
+            if _bad_status[r.status_code] <= 3:
+                log(f"HTTP {r.status_code} from {url.split('?')[0]}")
             if r.status_code in (400, 404):
                 return None
         except (requests.RequestException, ValueError):
@@ -64,9 +69,22 @@ def http_json(url, params=None, tries=3):
 
 
 # ---------------------------------------------------------------- Bundesagentur
+def extract_items(data):
+    """Find the list of job dicts in a response, whatever the endpoint version calls it."""
+    if not isinstance(data, dict):
+        return []
+    for key in ("stellenangebote", "jobs", "angebote", "results", "items"):
+        if isinstance(data.get(key), list):
+            return data[key]
+    for v in data.values():
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            return v
+    return []
+
+
 def ba_search(was, wo=None, umkreis=None, pages=2):
-    """Return raw 'stellenangebote' items for one query."""
-    global _ba_base
+    """Return raw job items for one query."""
+    global _ba_url
     out = []
     for page in range(1, pages + 1):
         params = {"was": was, "page": page, "size": 100, "veroeffentlichtseit": config.DAYS_BACK}
@@ -74,35 +92,47 @@ def ba_search(was, wo=None, umkreis=None, pages=2):
             params["wo"] = wo
         if umkreis is not None:
             params["umkreis"] = umkreis
-        data = None
-        for base in ([_ba_base] if _ba_base else BA_BASES):
-            data = http_json(base + "/jobs", params)
-            if data is not None:
-                _ba_base = base
-                break
-        if not data:
-            break
-        items = data.get("stellenangebote") or []
+        items = []
+        if _ba_url:
+            items = extract_items(http_json(_ba_url, params))
+        else:                                   # not decided yet: take the first endpoint that returns jobs
+            for url in SEARCH_URLS:
+                items = extract_items(http_json(url, params))
+                if items:
+                    _ba_url = url
+                    log(f"Using endpoint {url}")
+                    log("Sample result fields:", sorted(items[0].keys()))
+                    break
         out += items
         if len(items) < 100:
             break
     return out
 
 
+def pick(d, *keys):
+    for k in keys:
+        if d.get(k):
+            return d[k]
+    return ""
+
+
 def parse_ba(it):
-    ort = it.get("arbeitsort") or {}
-    ref = it.get("refnr")
+    ref = pick(it, "refnr", "referenznummer", "referenzNummer")
     if not ref:
         return None
+    ort = it.get("arbeitsort") or (it.get("arbeitsorte") or [{}])[0] or {}
+    if not isinstance(ort, dict):
+        ort = {}
+    region = pick(ort, "region", "bundesland")
     return {
         "id": "ba:" + ref,
         "ref": ref,
-        "title": (it.get("titel") or it.get("beruf") or "").strip(),
-        "company": (it.get("arbeitgeber") or "").strip(),
-        "location": ", ".join(x for x in [ort.get("ort"), ort.get("region")] if x),
-        "region": ort.get("region") or "",
+        "title": str(pick(it, "titel", "stellenangebotsTitel", "beruf")).strip(),
+        "company": str(pick(it, "arbeitgeber", "arbeitgeberName", "firma")).strip(),
+        "location": ", ".join(x for x in [pick(ort, "ort", "stadt"), region] if x),
+        "region": region,
         "url": "https://www.arbeitsagentur.de/jobsuche/jobdetail/" + ref,
-        "posted": it.get("aktuelleVeroeffentlichungsdatum") or "",
+        "posted": str(pick(it, "aktuelleVeroeffentlichungsdatum", "veroeffentlichungsdatum", "modifikationsTimestamp"))[:10],
         "source": "Bundesagentur für Arbeit",
     }
 
@@ -292,8 +322,10 @@ def update(state):
 
     trax = collect_trax()
     ws = collect_ws()
-    if _requests_ok == 0:
-        log("ERROR: no request succeeded. The job board may be down or has changed.")
+    if _requests_ok == 0 or (not trax and not ws):
+        log("ERROR: no jobs could be read. Requests OK:", _requests_ok, "| HTTP errors:", _bad_status,
+            "| endpoint:", _ba_url)
+        log("The job board may be down, may block GitHub servers, or may have changed its format.")
         sys.exit(1)
 
     for jid, j in trax.items():
@@ -429,7 +461,7 @@ def build_dashboard(state):
 
 def main():
     state = load_state()
-    first_run = not state["meta"].get("last_run")
+    first_run = not state["jobs"]
     new = update(state)
     state["meta"]["last_run"] = NOW_ISO
     open_total = len(state["jobs"])
